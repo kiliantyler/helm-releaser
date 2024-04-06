@@ -1,0 +1,57 @@
+name: Fetch and Compare Tags
+
+on:
+  schedule:
+  - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  compare-tags:
+    name: Compare Tags
+    outputs:
+      new_tag: ${{ steps.check_new_tag.outputs.new_tag }}
+      helm_latest_tag: ${{ steps.set_helm_tag.outputs.helm_latest_tag }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Fetch latest tag from helm/helm
+      id: fetch_helm_tag
+      uses: octokit/request-action@v2.x
+      with:
+        route: GET /repos/helm/helm/tags
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set latest helm/helm tag
+      id: set_helm_tag
+      run: echo "helm_latest_tag=$(echo '${{ steps.fetch_helm_tag.outputs.data }}' | jq -r '.[0].name' | sed 's/^v//')" >> $GITHUB_OUTPUT
+
+    - name: Fetch tags from kiliantyler/helm-releaser
+      id: fetch_releaser_tags
+      uses: octokit/request-action@v2.x
+      with:
+        route: GET /repos/kiliantyler/helm-releaser/tags
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Check if latest helm/helm tag is new
+      id: check_new_tag
+      run: |
+        if echo '${{ steps.fetch_releaser_tags.outputs.data }}' | jq -r '.[].name' | grep -q "${{ steps.set_helm_tag.outputs.helm_latest_tag }}"; then
+          echo "new_tag=false" >> $GITHUB_OUTPUT
+        else
+          echo "new_tag=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Output result
+      if: steps.check_new_tag.outputs.new_tag == 'true'
+      run: 'echo "New tag found in helm/helm: ${{ steps.set_helm_tag.outputs.helm_latest_tag }}. This tag is not present in kiliantyler/helm-releaser."'
+
+  release:
+    name: release
+    needs: compare-tags
+    permissions:
+      contents: write
+    if: needs.compare-tags.outputs.new_tag == 'true'
+    uses: ./.github/workflows/release.yaml
+    with:
+      tag: ${{ needs.compare-tags.outputs.helm_latest_tag }}

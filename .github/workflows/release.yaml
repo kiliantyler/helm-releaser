@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASER_DIR: releaser
+
+jobs:
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Show the version
+      run: |
+        echo "version is: v${{ inputs.tag }}"
+
+    - name: Create GitHub release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: gh release --repo ${{ github.repository }} create v${{ inputs.tag }} --draft --title v${{ inputs.tag }}
+
+  build-release:
+    name: build-release
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout helm repository
+      uses: actions/checkout@v4
+      with:
+        repository: helm/helm
+        ref: v${{ inputs.tag }}
+
+    - name: Setup Go
+      uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # pin@5.0.0
+      with:
+        go-version: '1.21'
+
+    - name: Run unit tests
+      run: make test-coverage
+
+    - name: Build Helm Binaries
+      run: |
+        set -eu -o pipefail
+        make build-cross
+        make dist checksum VERSION="v${{ inputs.tag }}"
+
+    - name: Upload release archive
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        for folder in `find _dist -mindepth 1 -maxdepth 1 -type d`; do
+          arch=${folder:6}
+          if [ -z $arch ]; then
+            continue
+          fi
+          echo "Uploading $arch"
+          ASSET=$(ls -1 _dist/helm-v${{ inputs.tag }}-${arch}.tar.gz)
+          ASSET_SUM=$(ls -1 _dist/helm-v${{ inputs.tag }}-${arch}.tar.gz.sha256)
+          gh release --repo ${{ github.repository }} upload v${{ inputs.tag }} ${ASSET} ${ASSET_SUM}
+        done
+
+  finish-release:
+    name: finish-release
+    if: ${{ success() }}
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Publish GitHub release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: gh release --repo ${{ github.repository }} edit v${{ inputs.tag }} --draft=false --title v${{ inputs.tag }} --latest
+
+  delete-release:
+    name: delete-release
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    if: ${{ always() && (needs.create-release.result != 'success' || needs.build-release.result != 'success') }}
+    steps:
+    - name: Create GitHub release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: gh release --repo ${{ github.repository }} delete v${{ inputs.tag }}
